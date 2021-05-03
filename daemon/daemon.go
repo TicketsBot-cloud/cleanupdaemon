@@ -31,6 +31,7 @@ func (d *Daemon) Run() {
 		return
 	}
 
+	var success []uint64
 	for _, guildId := range guildIds {
 		if err := d.client.PurgeGuild(guildId); err != nil {
 			log.Printf("error sending purge request: %s\n", err.Error())
@@ -38,6 +39,11 @@ func (d *Daemon) Run() {
 			continue
 		}
 
+		success = append(success, guildId)
 		time.Sleep(BreakTime)
+	}
+
+	if err := d.database.GuildLeaveTime.DeleteAll(success); err != nil {
+		d.logger.Printf("error while deleting leave times: %s\n", err.Error())
 	}
 }
