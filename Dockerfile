@@ -1,4 +1,4 @@
-FROM golang:alpine
+FROM golang:alpine AS builder
 
 RUN go version
 
