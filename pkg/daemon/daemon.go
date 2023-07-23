@@ -35,17 +35,12 @@ func (d *Daemon) Run() {
 		return
 	}
 
-	var success []uint64
 	for _, guildId := range guildIds {
 		if d.purgeGuild(guildId) {
-			success = append(success, guildId)
+			if err := d.database.GuildLeaveTime.Delete(guildId); err != nil {
+				d.logger.Error("error while deleting leave times", zap.Error(err))
+			}
 		}
-
-		time.Sleep(BreakTime)
-	}
-
-	if err := d.database.GuildLeaveTime.DeleteAll(success); err != nil {
-		d.logger.Error("error while deleting leave times", zap.Error(err))
 	}
 }
 
