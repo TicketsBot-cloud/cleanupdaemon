@@ -6,6 +6,8 @@ type Config struct {
 	DatabaseUri    string `env:"DB_URI"`
 	LogArchiverUri string `env:"LOG_ARCHIVER_URI"`
 	OneShot        bool   `env:"ONESHOT"`
+	ProductionMode bool   `env:"PRODUCTION_MODE" envDefault:"false"`
+	SentryDsn      string `env:"SENTRY_DSN"`
 }
 
 func Parse() (conf Config) {
