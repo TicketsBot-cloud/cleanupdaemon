@@ -10,7 +10,9 @@ import (
 	"github.com/TicketsBot/database"
 	"github.com/getsentry/sentry-go"
 	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/rxdn/gdl/rest/request"
 	"go.uber.org/zap"
+	"net/http"
 	"time"
 )
 
@@ -61,7 +63,14 @@ func main() {
 
 	logger.Debug("Built archiver client")
 
-	daemon := daemon.NewDaemon(logger, &client, db)
+	request.RegisterPreRequestHook(func(token string, req *http.Request) {
+		if len(conf.DiscordProxyUrl) > 0 {
+			req.URL.Scheme = "http"
+			req.URL.Host = conf.DiscordProxyUrl
+		}
+	})
+
+	daemon := daemon.NewDaemon(logger, conf, &client, db)
 	daemon.Run()
 
 	if !conf.OneShot {

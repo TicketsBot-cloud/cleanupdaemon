@@ -10,5 +10,6 @@ require (
 	github.com/getsentry/sentry-go v0.22.0 // indirect
 	github.com/jackc/fake v0.0.0-20150926172116-812a484cc733 // indirect
 	github.com/jackc/pgx/v4 v4.6.0
+	github.com/rxdn/gdl v0.0.0-20240708003854-64917d2277cf // indirect
 	go.uber.org/zap v1.24.0
 )

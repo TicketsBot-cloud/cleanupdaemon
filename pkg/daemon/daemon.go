@@ -2,8 +2,12 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"github.com/TicketsBot/archiverclient"
+	"github.com/TicketsBot/cleanupdaemon/pkg/config"
 	"github.com/TicketsBot/database"
+	"github.com/rxdn/gdl/rest"
+	"github.com/rxdn/gdl/rest/request"
 	"go.uber.org/zap"
 	"log"
 	"math"
@@ -14,13 +18,15 @@ const BreakTime = time.Second
 
 type Daemon struct {
 	logger   *zap.Logger
+	config   config.Config
 	client   *archiverclient.ArchiverClient
 	database *database.Database
 }
 
-func NewDaemon(logger *zap.Logger, client *archiverclient.ArchiverClient, database *database.Database) *Daemon {
+func NewDaemon(logger *zap.Logger, config config.Config, client *archiverclient.ArchiverClient, database *database.Database) *Daemon {
 	return &Daemon{
 		logger,
+		config,
 		client,
 		database,
 	}
@@ -36,9 +42,30 @@ func (d *Daemon) Run() {
 	}
 
 	for _, guildId := range guildIds {
+		logger := d.logger.With(zap.Uint64("guild", guildId))
+
+		// Add a 1s delay as we're making a REST request
+		time.Sleep(BreakTime)
+
+		inServer, err := d.isBotInServer(guildId)
+		if err != nil {
+			logger.Error("error while checking if bot is in server", zap.Error(err))
+			continue
+		}
+
+		if inServer {
+			logger.Warn("Bot is still in server, skipping purge")
+
+			if err := d.database.GuildLeaveTime.Delete(guildId); err != nil {
+				logger.Error("Error while deleting leave time", zap.Error(err))
+			}
+
+			continue
+		}
+
 		if d.purgeGuild(guildId) {
 			if err := d.database.GuildLeaveTime.Delete(guildId); err != nil {
-				d.logger.Error("error while deleting leave times", zap.Error(err))
+				logger.Error("error while deleting leave times", zap.Error(err))
 			}
 		}
 	}
@@ -122,4 +149,37 @@ func (d *Daemon) purgeGuild(guildId uint64) bool {
 			time.Sleep(time.Second * time.Duration(math.Max(10, float64(attempt))))
 		}
 	}
+}
+
+func (d *Daemon) isBotInServer(guildId uint64) (bool, error) {
+	botId, ok, err := d.database.WhitelabelGuilds.GetBotByGuild(guildId)
+	if err != nil {
+		return false, err
+	}
+
+	var token string
+	if ok {
+		bot, err := d.database.Whitelabel.GetByBotId(botId)
+		if err != nil {
+			return false, err
+		}
+
+		token = bot.Token
+	} else {
+		token = d.config.MainBotToken
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	defer cancel()
+
+	if _, err := rest.GetGuild(ctx, token, nil, guildId); err != nil {
+		var restError request.RestError
+		if errors.As(err, &restError) && (restError.StatusCode == 403 || restError.StatusCode == 404) {
+			return false, nil
+		} else {
+			return false, err
+		}
+	}
+
+	return true, nil
 }
