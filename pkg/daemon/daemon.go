@@ -3,15 +3,16 @@ package daemon
 import (
 	"context"
 	"errors"
-	"github.com/TicketsBot/archiverclient"
-	"github.com/TicketsBot/cleanupdaemon/pkg/config"
-	"github.com/TicketsBot/database"
-	"github.com/rxdn/gdl/rest"
-	"github.com/rxdn/gdl/rest/request"
-	"go.uber.org/zap"
 	"log"
 	"math"
 	"time"
+
+	"github.com/TicketsBot-cloud/archiverclient"
+	"github.com/TicketsBot-cloud/cleanupdaemon/pkg/config"
+	"github.com/TicketsBot-cloud/database"
+	"github.com/rxdn/gdl/rest"
+	"github.com/rxdn/gdl/rest/request"
+	"go.uber.org/zap"
 )
 
 const BreakTime = time.Second
@@ -19,11 +20,11 @@ const BreakTime = time.Second
 type Daemon struct {
 	logger   *zap.Logger
 	config   config.Config
-	client   *archiverclient.ArchiverClient
+	client   *archiverclient.PurgingClient
 	database *database.Database
 }
 
-func NewDaemon(logger *zap.Logger, config config.Config, client *archiverclient.ArchiverClient, database *database.Database) *Daemon {
+func NewDaemon(logger *zap.Logger, config config.Config, client *archiverclient.PurgingClient, database *database.Database) *Daemon {
 	return &Daemon{
 		logger,
 		config,
@@ -35,7 +36,8 @@ func NewDaemon(logger *zap.Logger, config config.Config, client *archiverclient.
 func (d *Daemon) Run() {
 	d.logger.Info("Starting run...")
 
-	guildIds, err := d.database.GuildLeaveTime.GetBefore(time.Hour * 24 * 28)
+	ctx := context.Background()
+	guildIds, err := d.database.GuildLeaveTime.GetBefore(ctx, time.Hour * 24 * 28)
 	if err != nil {
 		log.Printf("error occurred while fetching guild ids: %s\n", err.Error())
 		return
@@ -47,7 +49,7 @@ func (d *Daemon) Run() {
 		// Add a 1s delay as we're making a REST request
 		time.Sleep(BreakTime)
 
-		inServer, err := d.isBotInServer(guildId)
+		inServer, err := d.isBotInServer(ctx, guildId)
 		if err != nil {
 			logger.Error("error while checking if bot is in server", zap.Error(err))
 			continue
@@ -56,33 +58,33 @@ func (d *Daemon) Run() {
 		if inServer {
 			logger.Warn("Bot is still in server, skipping purge")
 
-			if err := d.database.GuildLeaveTime.Delete(guildId); err != nil {
+			if err := d.database.GuildLeaveTime.Delete(ctx, guildId); err != nil {
 				logger.Error("Error while deleting leave time", zap.Error(err))
 			}
 
 			continue
 		}
 
-		if d.purgeGuild(guildId) {
-			if err := d.database.GuildLeaveTime.Delete(guildId); err != nil {
+		if d.purgeGuild(ctx, guildId) {
+			if err := d.database.GuildLeaveTime.Delete(ctx, guildId); err != nil {
 				logger.Error("error while deleting leave times", zap.Error(err))
 			}
 		}
 	}
 }
 
-func (d *Daemon) purgeGuild(guildId uint64) bool {
-	if err := d.client.PurgeGuild(guildId); err != nil {
+func (d *Daemon) purgeGuild(ctx context.Context, guildId uint64) bool {
+	ctxStatus, cancelFunc := context.WithTimeout(ctx, 60*time.Minute)
+	defer cancelFunc()
+	
+	if err := d.client.PurgeGuild(ctxStatus, guildId); err != nil {
 		d.logger.Error("Error sending purge request", zap.Error(err), zap.Uint64("guild", guildId))
 		return false
 	}
 
-	ctx, cancelFunc := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancelFunc()
-
 	var attempt int
 	for {
-		if err := ctx.Err(); err != nil {
+		if err := ctxStatus.Err(); err != nil {
 			d.logger.Error(
 				"context threw error while checking purge status",
 				zap.Uint64("guild", guildId),
@@ -91,7 +93,7 @@ func (d *Daemon) purgeGuild(guildId uint64) bool {
 			return false
 		}
 
-		status, err := d.client.PurgeStatus(guildId)
+		status, err := d.client.PurgeStatus(ctxStatus, guildId)
 		if err != nil {
 			if err == archiverclient.ErrOperationNotFound {
 				d.logger.Warn(
@@ -109,57 +111,68 @@ func (d *Daemon) purgeGuild(guildId uint64) bool {
 			return false
 		}
 
-		if status.Status == archiverclient.StatusComplete {
-			d.logger.Info(
-				"logarchiver removed all transcripts successfully",
-				zap.Uint64("guild", guildId),
-				zap.Strings("objects", status.Removed),
-			)
-
-			return true
-		} else if status.Status == archiverclient.StatusFailed {
-			d.logger.Error(
-				"logarchiver failed to remove all transcripts",
-				zap.Uint64("guild", guildId),
-				zap.Strings("success", status.Removed),
-				zap.Strings("failed", status.Failed),
-			)
-
-			for objectName, errStr := range status.Errors {
-				d.logger.Error(
-					"logarchiver failed to remove transcript",
+		switch status.Status {
+			case archiverclient.StatusComplete:
+				d.logger.Info(
+					"logarchiver removed all transcripts successfully",
 					zap.Uint64("guild", guildId),
-					zap.String("object", objectName),
-					zap.String("error", errStr),
+					zap.Strings("objects", status.Removed),
 				)
+			
+				// Purge all guild data from the database
+				if err := d.database.PurgeGuildData(ctxStatus, guildId, d.logger); err != nil {
+					d.logger.Error(
+						"Failed to purge guild data from database",
+						zap.Uint64("guild", guildId),
+						zap.Error(err),
+					)
+					return false
+				}
+			
+				return true
+			case archiverclient.StatusFailed:
+				d.logger.Error(
+					"logarchiver failed to remove all transcripts",
+					zap.Uint64("guild", guildId),
+					zap.Strings("success", status.Removed),
+					zap.Strings("failed", status.Failed),
+				)
+	
+				for objectName, errStr := range status.Errors {
+					d.logger.Error(
+						"logarchiver failed to remove transcript",
+						zap.Uint64("guild", guildId),
+						zap.String("object", objectName),
+						zap.String("error", errStr),
+					)
+				}
+	
+				return false
+			case archiverclient.StatusInProgress:
+				d.logger.Debug(
+					"Purge in progress...",
+					zap.Uint64("guild", guildId),
+					zap.Int("status_check_attempt", attempt),
+					zap.Strings("objects", status.Removed),
+					zap.Strings("failed", status.Failed),
+				)
+	
+				attempt++
+	
+				time.Sleep(time.Second * time.Duration(math.Max(10, float64(attempt))))
 			}
-
-			return false
-		} else if status.Status == archiverclient.StatusInProgress {
-			d.logger.Debug(
-				"Purge in progress...",
-				zap.Uint64("guild", guildId),
-				zap.Int("status_check_attempt", attempt),
-				zap.Strings("objects", status.Removed),
-				zap.Strings("failed", status.Failed),
-			)
-
-			attempt++
-
-			time.Sleep(time.Second * time.Duration(math.Max(10, float64(attempt))))
-		}
 	}
 }
 
-func (d *Daemon) isBotInServer(guildId uint64) (bool, error) {
-	botId, ok, err := d.database.WhitelabelGuilds.GetBotByGuild(guildId)
+func (d *Daemon) isBotInServer(ctx context.Context ,guildId uint64) (bool, error) {
+	botId, ok, err := d.database.WhitelabelGuilds.GetBotByGuild(ctx, guildId)
 	if err != nil {
 		return false, err
 	}
 
 	var token string
 	if ok {
-		bot, err := d.database.Whitelabel.GetByBotId(botId)
+		bot, err := d.database.Whitelabel.GetByBotId(ctx, botId)
 		if err != nil {
 			return false, err
 		}
