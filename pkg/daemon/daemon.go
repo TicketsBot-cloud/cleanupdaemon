@@ -74,26 +74,14 @@ func (d *Daemon) Run() {
 }
 
 func (d *Daemon) purgeGuild(ctx context.Context, guildId uint64) bool {
-	ctxStatus, cancelFunc := context.WithTimeout(ctx, 60*time.Minute)
-	defer cancelFunc()
-	
-	if err := d.client.PurgeGuild(ctxStatus, guildId); err != nil {
+	if err := d.client.PurgeGuild(ctx, guildId); err != nil {
 		d.logger.Error("Error sending purge request", zap.Error(err), zap.Uint64("guild", guildId))
 		return false
 	}
 
 	var attempt int
 	for {
-		if err := ctxStatus.Err(); err != nil {
-			d.logger.Error(
-				"context threw error while checking purge status",
-				zap.Uint64("guild", guildId),
-				zap.Error(err),
-			)
-			return false
-		}
-
-		status, err := d.client.PurgeStatus(ctxStatus, guildId)
+		status, err := d.client.PurgeStatus(ctx, guildId)
 		if err != nil {
 			if err == archiverclient.ErrOperationNotFound {
 				d.logger.Warn(
@@ -114,13 +102,12 @@ func (d *Daemon) purgeGuild(ctx context.Context, guildId uint64) bool {
 		switch status.Status {
 			case archiverclient.StatusComplete:
 				d.logger.Info(
-					"logarchiver removed all transcripts successfully",
+					"logarchiver purge completed successfully",
 					zap.Uint64("guild", guildId),
-					zap.Strings("objects", status.Removed),
 				)
-			
+
 				// Purge all guild data from the database
-				if err := d.database.PurgeGuildData(ctxStatus, guildId, d.logger); err != nil {
+				if err := d.database.PurgeGuildData(ctx, guildId, d.logger); err != nil {
 					d.logger.Error(
 						"Failed to purge guild data from database",
 						zap.Uint64("guild", guildId),
@@ -128,25 +115,31 @@ func (d *Daemon) purgeGuild(ctx context.Context, guildId uint64) bool {
 					)
 					return false
 				}
-			
+
 				return true
 			case archiverclient.StatusFailed:
 				d.logger.Error(
-					"logarchiver failed to remove all transcripts",
+					"logarchiver purge failed",
 					zap.Uint64("guild", guildId),
-					zap.Strings("success", status.Removed),
-					zap.Strings("failed", status.Failed),
 				)
-	
-				for objectName, errStr := range status.Errors {
-					d.logger.Error(
-						"logarchiver failed to remove transcript",
-						zap.Uint64("guild", guildId),
-						zap.String("object", objectName),
-						zap.String("error", errStr),
-					)
+
+				if len(status.Errors) > 0 {
+					for objectName, errStr := range status.Errors {
+						d.logger.Error(
+							"logarchiver error detail",
+							zap.Uint64("guild", guildId),
+							zap.String("object", objectName),
+							zap.String("error", errStr),
+						)
+					}
 				}
-	
+
+				return false
+			case archiverclient.StatusTimeout:
+				d.logger.Error(
+					"logarchiver purge timed out after inactivity",
+					zap.Uint64("guild", guildId),
+				)
 				return false
 			case archiverclient.StatusInProgress:
 				d.logger.Debug(
@@ -156,11 +149,18 @@ func (d *Daemon) purgeGuild(ctx context.Context, guildId uint64) bool {
 					zap.Strings("objects", status.Removed),
 					zap.Strings("failed", status.Failed),
 				)
-	
+
 				attempt++
-	
+
 				time.Sleep(time.Second * time.Duration(math.Max(10, float64(attempt))))
-			}
+			default:
+				d.logger.Error(
+					"logarchiver returned unexpected status",
+					zap.Uint64("guild", guildId),
+					zap.String("status", string(status.Status)),
+				)
+				return false
+		}
 	}
 }
 
