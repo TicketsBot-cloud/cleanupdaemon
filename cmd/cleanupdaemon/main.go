@@ -3,17 +3,18 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/TicketsBot/archiverclient"
-	"github.com/TicketsBot/cleanupdaemon/pkg/config"
-	"github.com/TicketsBot/cleanupdaemon/pkg/daemon"
-	"github.com/TicketsBot/common/observability"
-	"github.com/TicketsBot/database"
+	"net/http"
+	"time"
+
+	"github.com/TicketsBot-cloud/archiverclient"
+	"github.com/TicketsBot-cloud/cleanupdaemon/pkg/config"
+	"github.com/TicketsBot-cloud/cleanupdaemon/pkg/daemon"
+	"github.com/TicketsBot-cloud/common/observability"
+	"github.com/TicketsBot-cloud/database"
 	"github.com/getsentry/sentry-go"
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/rxdn/gdl/rest/request"
 	"go.uber.org/zap"
-	"net/http"
-	"time"
 )
 
 func main() {
@@ -59,7 +60,8 @@ func main() {
 	logger.Debug("Built database client")
 
 	// encryption key is not used
-	client := archiverclient.NewArchiverClient(conf.LogArchiverUri, nil)
+	retriever := archiverclient.NewProxyRetriever(conf.LogArchiverUri)
+	client := archiverclient.NewPurgingClient(retriever, nil)
 
 	logger.Debug("Built archiver client")
 
@@ -70,7 +72,7 @@ func main() {
 		}
 	})
 
-	daemon := daemon.NewDaemon(logger, conf, &client, db)
+	daemon := daemon.NewDaemon(logger, conf, client, db)
 	daemon.Run()
 
 	if !conf.OneShot {

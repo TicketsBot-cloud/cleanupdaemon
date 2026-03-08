@@ -4,8 +4,8 @@ RUN go version
 
 RUN apk update && apk upgrade && apk add git zlib-dev gcc musl-dev
 
-COPY . /go/src/github.com/TicketsBot/cleanupdaemon
-WORKDIR /go/src/github.com/TicketsBot/cleanupdaemon
+COPY . /go/src/github.com/TicketsBot-cloud/cleanupdaemon
+WORKDIR /go/src/github.com/TicketsBot-cloud/cleanupdaemon
 
 RUN set -Eeux && \
     go mod download && \
@@ -20,7 +20,7 @@ FROM alpine:latest
 
 RUN apk update && apk upgrade
 
-COPY --from=builder /go/src/github.com/TicketsBot/cleanupdaemon/main /srv/daemon/main
+COPY --from=builder /go/src/github.com/TicketsBot-cloud/cleanupdaemon/main /srv/daemon/main
 RUN chmod +x /srv/daemon/main
 
 RUN adduser container --disabled-password --no-create-home
