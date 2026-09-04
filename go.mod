@@ -4,14 +4,14 @@ go 1.24.0
 
 //replace github.com/TicketsBot-cloud/archiverclient => ../archiverclient
 
-//replace github.com/TicketsBot-cloud/common => ../common
+replace github.com/TicketsBot-cloud/common => ../common
 
-//replace github.com/TicketsBot-cloud/database => ../database
+replace github.com/TicketsBot-cloud/database => ../database
 
 require (
-	github.com/TicketsBot-cloud/archiverclient v0.0.0-20260106203614-3f2fdd061b8b
-	github.com/TicketsBot-cloud/common v0.0.0-20251026182733-99fa0dc31d90
-	github.com/TicketsBot-cloud/database v0.0.0-20260106203748-e9a3db5cdcd6
+	github.com/TicketsBot-cloud/archiverclient v0.0.0-20260425075746-c37717f34d16
+	github.com/TicketsBot-cloud/common v0.0.0-20260827064609-69131fc7bd3e
+	github.com/TicketsBot-cloud/database v0.0.0-20260829063441-2dc7109928ef
 	github.com/caarlos0/env/v6 v6.10.1
 	github.com/getsentry/sentry-go v0.40.0
 	github.com/jackc/pgx/v4 v4.18.3
@@ -20,7 +20,7 @@ require (
 )
 
 require (
-	github.com/TicketsBot-cloud/gdl v0.0.0-20260103195545-cf76b185bdbc // indirect
+	github.com/TicketsBot-cloud/gdl v0.0.0-20260306134952-cccb0116fef6 // indirect
 	github.com/TicketsBot-cloud/logarchiver v0.0.0-20251018211319-7a7df5cacbdc // indirect
 	github.com/TicketsBot/common v0.0.0-20241117150316-ff54c97b45c1 // indirect
 	github.com/TicketsBot/ttlcache v1.6.1-0.20200405150101-acc18e37b261 // indirect
