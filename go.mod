@@ -2,7 +2,7 @@ module github.com/TicketsBot-cloud/cleanupdaemon
 
 go 1.24.0
 
-//replace github.com/TicketsBot-cloud/archiverclient => ../archiverclient
+replace github.com/TicketsBot-cloud/archiverclient => ../archiverclient
 
 replace github.com/TicketsBot-cloud/common => ../common
 
