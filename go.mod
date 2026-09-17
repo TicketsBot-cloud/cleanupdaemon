@@ -2,16 +2,16 @@ module github.com/TicketsBot-cloud/cleanupdaemon
 
 go 1.26.0
 
-replace github.com/TicketsBot-cloud/archiverclient => ../archiverclient
+// replace github.com/TicketsBot-cloud/archiverclient => ../archiverclient
 
-replace github.com/TicketsBot-cloud/common => ../common
+// replace github.com/TicketsBot-cloud/common => ../common
 
-replace github.com/TicketsBot-cloud/database => ../database
+// replace github.com/TicketsBot-cloud/database => ../database
 
 require (
 	github.com/TicketsBot-cloud/archiverclient v0.0.0-20260912070140-b0cd1b003b87
 	github.com/TicketsBot-cloud/common v0.0.0-20260905165836-38e4090764a4
-	github.com/TicketsBot-cloud/database v0.0.0-20260909063631-6804baaaa52b
+	github.com/TicketsBot-cloud/database v0.0.0-20260913165941-c2ecc7191b02
 	github.com/caarlos0/env/v6 v6.10.1
 	github.com/getsentry/sentry-go v0.40.0
 	github.com/jackc/pgx/v4 v4.18.3
