@@ -73,12 +73,21 @@ func main() {
 	})
 
 	daemon := daemon.NewDaemon(logger, conf, client, db)
+
+	// sentry-go buffers on an async transport; ONESHOT would otherwise drop the
+	// final run's events on return.
+	defer sentry.Flush(time.Second * 2)
+	defer logger.Sync()
+	defer pool.Close()
+
 	daemon.Run()
 
-	if !conf.OneShot {
-		for {
-			time.Sleep(time.Hour * 6)
-			daemon.Run()
-		}
+	if conf.OneShot {
+		return
+	}
+
+	for {
+		time.Sleep(time.Hour * 6)
+		daemon.Run()
 	}
 }

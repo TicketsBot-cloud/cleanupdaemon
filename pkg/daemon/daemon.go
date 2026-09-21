@@ -3,8 +3,9 @@ package daemon
 import (
 	"context"
 	"errors"
-	"log"
-	"math"
+	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/TicketsBot-cloud/archiverclient"
@@ -15,7 +16,17 @@ import (
 	"go.uber.org/zap"
 )
 
-const BreakTime = time.Second
+const (
+	BreakTime = time.Second
+
+	RetentionPeriod = time.Hour * 24 * 28
+
+	// Without this the status poll below has no exit of its own.
+	purgeTimeout = 5 * time.Minute
+
+	minPollInterval = time.Second * 10
+	maxPollInterval = time.Minute
+)
 
 type Daemon struct {
 	logger   *zap.Logger
@@ -37,9 +48,9 @@ func (d *Daemon) Run() {
 	d.logger.Info("Starting run...")
 
 	ctx := context.Background()
-	guildIds, err := d.database.GuildLeaveTime.GetBefore(ctx, time.Hour * 24 * 28)
+	guildIds, err := d.database.GuildLeaveTime.GetBefore(ctx, RetentionPeriod)
 	if err != nil {
-		log.Printf("error occurred while fetching guild ids: %s\n", err.Error())
+		d.logger.Error("Error while fetching guild ids", zap.Error(err))
 		return
 	}
 
@@ -65,106 +76,114 @@ func (d *Daemon) Run() {
 			continue
 		}
 
-		if d.purgeGuild(ctx, guildId) {
-			if err := d.database.GuildLeaveTime.Delete(ctx, guildId); err != nil {
-				logger.Error("error while deleting leave times", zap.Error(err))
-			}
+		if err := d.purgeGuild(ctx, guildId); err != nil {
+			logger.Error("Failed to purge guild", zap.Error(err))
+			continue
+		}
+
+		if err := d.database.GuildLeaveTime.Delete(ctx, guildId); err != nil {
+			logger.Error("error while deleting leave times", zap.Error(err))
 		}
 	}
 }
 
-func (d *Daemon) purgeGuild(ctx context.Context, guildId uint64) bool {
-	if err := d.client.PurgeGuild(ctx, guildId); err != nil {
-		d.logger.Error("Error sending purge request", zap.Error(err), zap.Uint64("guild", guildId))
-		return false
+// Database first: the archiver delete is irreversible, so the other order lets a
+// database failure destroy the transcripts. Both halves are idempotent.
+func (d *Daemon) purgeGuild(ctx context.Context, guildId uint64) error {
+	if err := d.database.PurgeGuildData(ctx, guildId, d.logger); err != nil {
+		return fmt.Errorf("purging guild data from database: %w", err)
 	}
 
-	var attempt int
-	for {
+	return d.purgeTranscripts(ctx, guildId)
+}
+
+func (d *Daemon) purgeTranscripts(ctx context.Context, guildId uint64) error {
+	ctx, cancel := context.WithTimeout(ctx, purgeTimeout)
+	defer cancel()
+
+	if err := d.client.PurgeGuild(ctx, guildId); err != nil {
+		return fmt.Errorf("sending purge request to logarchiver: %w", err)
+	}
+
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("timed out waiting for logarchiver purge: %w", err)
+		}
+
 		status, err := d.client.PurgeStatus(ctx, guildId)
 		if err != nil {
-			if err == archiverclient.ErrOperationNotFound {
-				d.logger.Warn(
-					"logarchiver return not found when fetching purge status",
-					zap.Uint64("guild", guildId),
-				)
-			} else {
-				d.logger.Error(
-					"Error when fetching purge status from logarchiver",
-					zap.Uint64("guild", guildId),
-					zap.Error(err),
-				)
+			if errors.Is(err, archiverclient.ErrOperationNotFound) {
+				return fmt.Errorf("logarchiver lost the purge operation: %w", err)
 			}
 
-			return false
+			return fmt.Errorf("fetching purge status from logarchiver: %w", err)
 		}
 
 		switch status.Status {
-			case archiverclient.StatusComplete:
-				d.logger.Info(
-					"logarchiver purge completed successfully",
-					zap.Uint64("guild", guildId),
-				)
+		case archiverclient.StatusComplete:
+			d.logger.Info(
+				"logarchiver purge completed successfully",
+				zap.Uint64("guild", guildId),
+			)
 
-				// Purge all guild data from the database
-				if err := d.database.PurgeGuildData(ctx, guildId, d.logger); err != nil {
-					d.logger.Error(
-						"Failed to purge guild data from database",
-						zap.Uint64("guild", guildId),
-						zap.Error(err),
-					)
-					return false
-				}
+			return nil
 
-				return true
-			case archiverclient.StatusFailed:
-				d.logger.Error(
-					"logarchiver purge failed",
-					zap.Uint64("guild", guildId),
-				)
+		case archiverclient.StatusFailed:
+			return fmt.Errorf("logarchiver purge failed%s", formatPurgeErrors(status))
 
-				if len(status.Errors) > 0 {
-					for objectName, errStr := range status.Errors {
-						d.logger.Error(
-							"logarchiver error detail",
-							zap.Uint64("guild", guildId),
-							zap.String("object", objectName),
-							zap.String("error", errStr),
-						)
-					}
-				}
+		case archiverclient.StatusTimeout:
+			return errors.New("logarchiver purge timed out after inactivity")
 
-				return false
-			case archiverclient.StatusTimeout:
-				d.logger.Error(
-					"logarchiver purge timed out after inactivity",
-					zap.Uint64("guild", guildId),
-				)
-				return false
-			case archiverclient.StatusInProgress:
-				d.logger.Debug(
-					"Purge in progress...",
-					zap.Uint64("guild", guildId),
-					zap.Int("status_check_attempt", attempt),
-					zap.Strings("objects", status.Removed),
-					zap.Strings("failed", status.Failed),
-				)
+		case archiverclient.StatusInProgress:
+			d.logger.Debug(
+				"Purge in progress...",
+				zap.Uint64("guild", guildId),
+				zap.Int("status_check_attempt", attempt),
+				zap.Strings("objects", status.Removed),
+				zap.Strings("failed", status.Failed),
+			)
 
-				attempt++
+			time.Sleep(pollInterval(attempt))
 
-				time.Sleep(time.Second * time.Duration(math.Max(10, float64(attempt))))
-			default:
-				d.logger.Error(
-					"logarchiver returned unexpected status",
-					zap.Uint64("guild", guildId),
-					zap.String("status", string(status.Status)),
-				)
-				return false
+		default:
+			return fmt.Errorf("logarchiver returned unexpected status %q", status.Status)
 		}
 	}
 }
 
-func (d *Daemon) isBotInServer(ctx context.Context ,guildId uint64) (bool, error) {
+func pollInterval(attempt int) time.Duration {
+	interval := minPollInterval + time.Duration(attempt)*time.Second
+	if interval > maxPollInterval {
+		return maxPollInterval
+	}
+
+	return interval
+}
+
+func formatPurgeErrors(status archiverclient.PurgeStatus) string {
+	if len(status.Errors) == 0 {
+		if len(status.Failed) == 0 {
+			return " (logarchiver reported no detail; check its own logs)"
+		}
+
+		return fmt.Sprintf(" (failed objects: %s)", strings.Join(status.Failed, ", "))
+	}
+
+	objects := make([]string, 0, len(status.Errors))
+	for object := range status.Errors {
+		objects = append(objects, object)
+	}
+	sort.Strings(objects)
+
+	details := make([]string, 0, len(objects))
+	for _, object := range objects {
+		details = append(details, fmt.Sprintf("%s: %s", object, status.Errors[object]))
+	}
+
+	return fmt.Sprintf(" (%s)", strings.Join(details, "; "))
+}
+
+func (d *Daemon) isBotInServer(ctx context.Context, guildId uint64) (bool, error) {
 	botId, ok, err := d.database.WhitelabelGuilds.GetBotByGuild(ctx, guildId)
 	if err != nil {
 		return false, err
@@ -182,7 +201,7 @@ func (d *Daemon) isBotInServer(ctx context.Context ,guildId uint64) (bool, error
 		token = d.config.MainBotToken
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
 	defer cancel()
 
 	if _, err := rest.GetGuild(ctx, token, nil, guildId); err != nil {
