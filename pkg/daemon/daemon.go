@@ -19,8 +19,6 @@ import (
 const (
 	BreakTime = time.Second
 
-	RetentionPeriod = time.Hour * 24 * 28
-
 	// Without this the status poll below has no exit of its own.
 	purgeTimeout = 5 * time.Minute
 
@@ -48,7 +46,8 @@ func (d *Daemon) Run() {
 	d.logger.Info("Starting run...")
 
 	ctx := context.Background()
-	guildIds, err := d.database.GuildLeaveTime.GetBefore(ctx, RetentionPeriod)
+	retentionPeriod := time.Duration(d.config.RetentionPeriodDays) * 24 * time.Hour
+	guildIds, err := d.database.GuildLeaveTime.GetBefore(ctx, retentionPeriod)
 	if err != nil {
 		d.logger.Error("Error while fetching guild ids", zap.Error(err))
 		return
