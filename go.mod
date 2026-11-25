@@ -4,14 +4,14 @@ go 1.26.0
 
 // replace github.com/TicketsBot-cloud/archiverclient => ../archiverclient
 
-replace github.com/TicketsBot-cloud/common => ../common
+// replace github.com/TicketsBot-cloud/common => ../common
 
-replace github.com/TicketsBot-cloud/database => ../database
+// replace github.com/TicketsBot-cloud/database => ../database
 
 require (
 	github.com/TicketsBot-cloud/archiverclient v0.0.0-20260912070140-b0cd1b003b87
-	github.com/TicketsBot-cloud/common v0.0.0-20260905165836-38e4090764a4
-	github.com/TicketsBot-cloud/database v0.0.0-20260913165941-c2ecc7191b02
+	github.com/TicketsBot-cloud/common v0.0.0-20261125211506-1dc1b3403cad
+	github.com/TicketsBot-cloud/database v0.0.0-20261125210836-e9dee689b8ff
 	github.com/caarlos0/env/v6 v6.10.1
 	github.com/getsentry/sentry-go v0.40.0
 	github.com/jackc/pgx/v4 v4.18.3
@@ -61,11 +61,11 @@ require (
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/crypto v0.59.0 // indirect
 	golang.org/x/exp v0.0.0-20251219203646-944ab1f22d93 // indirect
-	golang.org/x/net v0.59.0 // indirect
-	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	gopkg.in/ini.v1 v1.67.3 // indirect
 )
