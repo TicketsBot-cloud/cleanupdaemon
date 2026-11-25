@@ -10,6 +10,7 @@ import (
 
 	"github.com/TicketsBot-cloud/archiverclient"
 	"github.com/TicketsBot-cloud/cleanupdaemon/pkg/config"
+	"github.com/TicketsBot-cloud/common/encryption"
 	"github.com/TicketsBot-cloud/database"
 	"github.com/rxdn/gdl/rest"
 	"github.com/rxdn/gdl/rest/request"
@@ -27,18 +28,20 @@ const (
 )
 
 type Daemon struct {
-	logger   *zap.Logger
-	config   config.Config
-	client   *archiverclient.PurgingClient
-	database *database.Database
+	logger       *zap.Logger
+	config       config.Config
+	client       *archiverclient.PurgingClient
+	database     *database.Database
+	tokenKeyring *encryption.Keyring
 }
 
-func NewDaemon(logger *zap.Logger, config config.Config, client *archiverclient.PurgingClient, database *database.Database) *Daemon {
+func NewDaemon(logger *zap.Logger, config config.Config, client *archiverclient.PurgingClient, database *database.Database, tokenKeyring *encryption.Keyring) *Daemon {
 	return &Daemon{
 		logger,
 		config,
 		client,
 		database,
+		tokenKeyring,
 	}
 }
 
@@ -195,7 +198,12 @@ func (d *Daemon) isBotInServer(ctx context.Context, guildId uint64) (bool, error
 			return false, err
 		}
 
-		token = bot.Token
+		// An error here must stop the purge: without the token, the bot's
+		// presence in the server is unknown.
+		token, err = d.tokenKeyring.ResolveStored(botId, bot.Token, bot.TokenCiphertext, bot.TokenKeyVersion)
+		if err != nil {
+			return false, fmt.Errorf("resolving token for whitelabel bot %d: %w", botId, err)
+		}
 	} else {
 		token = d.config.MainBotToken
 	}

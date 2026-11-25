@@ -9,6 +9,7 @@ import (
 	"github.com/TicketsBot-cloud/archiverclient"
 	"github.com/TicketsBot-cloud/cleanupdaemon/pkg/config"
 	"github.com/TicketsBot-cloud/cleanupdaemon/pkg/daemon"
+	"github.com/TicketsBot-cloud/common/encryption"
 	"github.com/TicketsBot-cloud/common/observability"
 	"github.com/TicketsBot-cloud/database"
 	"github.com/getsentry/sentry-go"
@@ -47,6 +48,11 @@ func main() {
 		panic(err)
 	}
 
+	tokenKeyring, err := encryption.ParseKeyring(conf.WhitelabelTokenKeys, conf.WhitelabelTokenActiveKeyVersion)
+	if err != nil {
+		logger.Fatal("Invalid whitelabel token key configuration", zap.Error(err))
+	}
+
 	logger.Debug("Connecting to database...")
 	pool, err := pgxpool.Connect(context.Background(), conf.DatabaseUri)
 	if err != nil {
@@ -72,7 +78,7 @@ func main() {
 		}
 	})
 
-	daemon := daemon.NewDaemon(logger, conf, client, db)
+	daemon := daemon.NewDaemon(logger, conf, client, db, tokenKeyring)
 
 	// sentry-go buffers on an async transport; ONESHOT would otherwise drop the
 	// final run's events on return.

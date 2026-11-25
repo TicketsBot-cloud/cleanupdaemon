@@ -5,3 +5,5 @@
 - RETENTION_PERIOD_DAYS
 - MAIN_BOT_TOKEN
 - DISCORD_PROXY_URL
+- WHITELABEL_TOKEN_KEYS // required, version:base64 pairs, for example 1:<base64 of 32 bytes>
+- WHITELABEL_TOKEN_ACTIVE_KEY_VERSION // required, must exist in WHITELABEL_TOKEN_KEYS
