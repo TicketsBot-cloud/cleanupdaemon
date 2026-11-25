@@ -4,9 +4,9 @@ go 1.26.0
 
 // replace github.com/TicketsBot-cloud/archiverclient => ../archiverclient
 
-// replace github.com/TicketsBot-cloud/common => ../common
+replace github.com/TicketsBot-cloud/common => ../common
 
-// replace github.com/TicketsBot-cloud/database => ../database
+replace github.com/TicketsBot-cloud/database => ../database
 
 require (
 	github.com/TicketsBot-cloud/archiverclient v0.0.0-20260912070140-b0cd1b003b87
