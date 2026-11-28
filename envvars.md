@@ -1,8 +1,13 @@
 - DB_URI
+- CACHE_URI (optional; cache database. When set, a purged guild's cache rows are deleted, cache users with no members row unseen for the retention period are swept daily, and cache guilds are included in reconciliation. An error is logged at startup in production mode when it is unset)
 - LOG_ARCHIVER_URI
-- ONESHOT
+- ONESHOT (runs one reconciliation, if enabled, then one purge run, then exits)
 - PRODUCTION_MODE
-- RETENTION_PERIOD_DAYS
+- RETENTION_PERIOD_DAYS (default 30)
+- PURGE_CONCURRENCY (default 1; how many due guilds are checked and purged in parallel. Each worker keeps its own 1 second pause before every Discord request, and each holds a main database connection while purging, so keep it within the pool size. All workers and the reconciler share one budget of 5,000 401, 403, 404 and 429 responses per rolling 10 minutes, well below the 10,000 at which Discord bans the IP, and pause once it is spent)
+- RECONCILE_INTERVAL_HOURS (default 24; how often to compare stored guilds against every bot's guild list and enqueue missed leaves. A successful run also clears queued purges for guilds any bot is still in. Newly found leaves are dated to the previous successful run, but never more than one interval back. If a whitelabel bot cannot be listed, the guilds mapped to it are left untouched and the run carries on. A run aborts if the public listing fails or is below 98% of the previous successful one. 0 disables it)
+- SERVER_COUNTER_URL (strongly recommended in production; base URL of the server counter. Reconciliation reads `/total` and, only when that does not answer 200, falls back to `/shards`, which is used only if every shard is connected. A 200 from `/total` without success=true and a count aborts the run. The public bot's listed guild count must be within 2% of the reference in either direction. When unset, the check falls back to requiring 90% of the cache guild count, which is weak: the cache includes stale guilds, so a listing missing tens of thousands of guilds can still pass. Reconciliation refuses to start when neither this nor CACHE_URI is set)
+- MIN_REFERENCE_GUILDS (default 100000; reconciliation aborts if the server counter or cache reference is below this, which catches a counter reporting a near-zero count after a resumed sharder deploy)
 - MAIN_BOT_TOKEN
 - DISCORD_PROXY_URL
 - WHITELABEL_TOKEN_KEYS // required, version:base64 pairs, for example 1:<base64 of 32 bytes>

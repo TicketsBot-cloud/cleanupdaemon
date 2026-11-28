@@ -6,14 +6,14 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/TicketsBot-cloud/archiverclient"
 	"github.com/TicketsBot-cloud/cleanupdaemon/pkg/config"
 	"github.com/TicketsBot-cloud/common/encryption"
 	"github.com/TicketsBot-cloud/database"
-	"github.com/rxdn/gdl/rest"
-	"github.com/rxdn/gdl/rest/request"
+	"github.com/jackc/pgx/v4/pgxpool"
 	"go.uber.org/zap"
 )
 
@@ -25,78 +25,224 @@ const (
 
 	minPollInterval = time.Second * 10
 	maxPollInterval = time.Minute
+
+	queryTimeout   = 30 * time.Second
+	dbPurgeTimeout = 2 * time.Minute
+
+	// Rows this far past retention mean purges are failing or falling behind.
+	stuckPurgeGrace = 7 * 24 * time.Hour
 )
 
 type Daemon struct {
-	logger       *zap.Logger
-	config       config.Config
-	client       *archiverclient.PurgingClient
-	database     *database.Database
+	logger   *zap.Logger
+	config   config.Config
+	client   *archiverclient.PurgingClient
+	database *database.Database
+	pool     *pgxpool.Pool
+	// nil when CACHE_URI is unset.
+	cachePool *pgxpool.Pool
+	discord   *discordClient
+	// Shared by every purge worker and the reconciler, since Cloudflare bans by IP.
+	budget       *invalidBudget
 	tokenKeyring *encryption.Keyring
+
+	// Only touched by the goroutine calling Run.
+	lastUserSweep time.Time
+	// Only touched by the goroutine calling Reconcile.
+	lastReconcileStart time.Time
+	lastPublicListed   int
 }
 
-func NewDaemon(logger *zap.Logger, config config.Config, client *archiverclient.PurgingClient, database *database.Database, tokenKeyring *encryption.Keyring) *Daemon {
+var errLeaveCancelled = errors.New("guild_leave_time row was removed, the bot was probably re-added")
+
+func NewDaemon(
+	logger *zap.Logger,
+	config config.Config,
+	client *archiverclient.PurgingClient,
+	database *database.Database,
+	pool *pgxpool.Pool,
+	cachePool *pgxpool.Pool,
+	tokenKeyring *encryption.Keyring,
+) *Daemon {
+	budget := newInvalidBudget(logger, invalidBudgetLimit, invalidBudgetWindow)
+
 	return &Daemon{
-		logger,
-		config,
-		client,
-		database,
-		tokenKeyring,
+		logger:    logger,
+		config:    config,
+		client:    client,
+		database:  database,
+		pool:      pool,
+		cachePool: cachePool,
+		discord:   newDiscordClient(logger, config.DiscordProxyUrl, budget),
+		budget:    budget,
+
+		tokenKeyring: tokenKeyring,
 	}
 }
 
-func (d *Daemon) Run() {
+func (d *Daemon) Run(ctx context.Context) {
 	d.logger.Info("Starting run...")
 
-	ctx := context.Background()
 	retentionPeriod := time.Duration(d.config.RetentionPeriodDays) * 24 * time.Hour
-	guildIds, err := d.database.GuildLeaveTime.GetBefore(ctx, retentionPeriod)
+
+	d.reportStuckPurges(ctx, retentionPeriod)
+
+	if d.cachePool != nil && time.Since(d.lastUserSweep) >= userSweepInterval {
+		d.sweepCacheUsers(ctx, retentionPeriod)
+		d.lastUserSweep = time.Now()
+	}
+
+	guildIds, err := d.dueGuilds(ctx, retentionPeriod)
 	if err != nil {
 		d.logger.Error("Error while fetching guild ids", zap.Error(err))
 		return
 	}
 
-	for _, guildId := range guildIds {
-		logger := d.logger.With(zap.Uint64("guild", guildId))
+	workers := max(d.config.PurgeConcurrency, 1)
+	d.logger.Info("Purging due guilds", zap.Int("due", len(guildIds)), zap.Int("workers", workers))
 
-		// Add a 1s delay as we're making a REST request
-		time.Sleep(BreakTime)
-
-		inServer, err := d.isBotInServer(ctx, guildId)
-		if err != nil {
-			logger.Error("error while checking if bot is in server", zap.Error(err))
-			continue
-		}
-
-		if inServer {
-			logger.Warn("Bot is still in server, skipping purge")
-
-			if err := d.database.GuildLeaveTime.Delete(ctx, guildId); err != nil {
-				logger.Error("Error while deleting leave time", zap.Error(err))
+	jobs := make(chan uint64)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for guildId := range jobs {
+				d.processGuild(ctx, guildId)
 			}
+		}()
+	}
 
-			continue
+	for _, guildId := range guildIds {
+		jobs <- guildId
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+// processGuild must stay safe to call concurrently: it only shares the pools,
+// the archiver client and the logger, all of which are.
+func (d *Daemon) processGuild(ctx context.Context, guildId uint64) {
+	logger := d.logger.With(zap.Uint64("guild", guildId))
+
+	inServer, err := d.isBotInServer(ctx, guildId)
+	if err != nil {
+		logger.Error("error while checking if bot is in server", zap.Error(err))
+		return
+	}
+
+	if inServer {
+		logger.Warn("Bot is still in server, skipping purge")
+
+		if err := d.deleteLeaveTime(ctx, guildId); err != nil {
+			logger.Error("Error while deleting leave time", zap.Error(err))
 		}
 
-		if err := d.purgeGuild(ctx, guildId); err != nil {
-			logger.Error("Failed to purge guild", zap.Error(err))
-			continue
+		return
+	}
+
+	if err := d.purgeGuild(ctx, guildId); err != nil {
+		if errors.Is(err, errLeaveCancelled) {
+			logger.Warn("Purge aborted", zap.Error(err))
+			return
 		}
 
-		if err := d.database.GuildLeaveTime.Delete(ctx, guildId); err != nil {
-			logger.Error("error while deleting leave times", zap.Error(err))
-		}
+		logger.Error("Failed to purge guild", zap.Error(err))
+		return
+	}
+
+	if err := d.deleteLeaveTime(ctx, guildId); err != nil {
+		logger.Error("error while deleting leave times", zap.Error(err))
 	}
 }
 
-// Database first: the archiver delete is irreversible, so the other order lets a
-// database failure destroy the transcripts. Both halves are idempotent.
+func (d *Daemon) dueGuilds(ctx context.Context, retention time.Duration) ([]uint64, error) {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
+	return d.database.GuildLeaveTime.GetBefore(ctx, retention)
+}
+
+func (d *Daemon) deleteLeaveTime(ctx context.Context, guildId uint64) error {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
+	return d.database.GuildLeaveTime.Delete(ctx, guildId)
+}
+
+// ensureStillLeft returns errLeaveCancelled when the queue row is gone, which
+// the guild create listener does when the bot is re-added.
+func (d *Daemon) ensureStillLeft(ctx context.Context, guildId uint64) error {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
+	var exists bool
+	if err := d.pool.QueryRow(
+		ctx,
+		`SELECT EXISTS(SELECT 1 FROM guild_leave_time WHERE "guild_id" = $1);`,
+		guildId,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("checking guild_leave_time: %w", err)
+	}
+
+	if !exists {
+		return errLeaveCancelled
+	}
+
+	return nil
+}
+
+func (d *Daemon) reportStuckPurges(ctx context.Context, retention time.Duration) {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
+	var count int64
+	if err := d.pool.QueryRow(
+		ctx,
+		`SELECT COUNT(*) FROM guild_leave_time WHERE "leave_time" < NOW() - $1::interval;`,
+		retention+stuckPurgeGrace,
+	).Scan(&count); err != nil {
+		d.logger.Error("Error while counting overdue guild purges", zap.Error(err))
+		return
+	}
+
+	if count > 0 {
+		d.logger.Error(
+			"Guilds are overdue for purging",
+			zap.Int64("count", count),
+			zap.Duration("overdue_after", retention+stuckPurgeGrace),
+		)
+	}
+}
+
+// The archiver delete is last because it is irreversible: any earlier failure
+// leaves the leave time in place and the whole purge is retried next run. Every
+// step is idempotent.
 func (d *Daemon) purgeGuild(ctx context.Context, guildId uint64) error {
-	if err := d.database.PurgeGuildData(ctx, guildId, d.logger); err != nil {
+	if err := d.ensureStillLeft(ctx, guildId); err != nil {
+		return fmt.Errorf("before database purge: %w", err)
+	}
+
+	if err := d.purgeDatabase(ctx, guildId); err != nil {
 		return fmt.Errorf("purging guild data from database: %w", err)
 	}
 
+	if err := d.purgeCache(ctx, guildId); err != nil {
+		return fmt.Errorf("purging guild data from cache: %w", err)
+	}
+
+	if err := d.ensureStillLeft(ctx, guildId); err != nil {
+		return fmt.Errorf("before transcript purge: %w", err)
+	}
+
 	return d.purgeTranscripts(ctx, guildId)
+}
+
+func (d *Daemon) purgeDatabase(ctx context.Context, guildId uint64) error {
+	ctx, cancel := context.WithTimeout(ctx, dbPurgeTimeout)
+	defer cancel()
+
+	return d.database.PurgeGuildData(ctx, guildId, d.logger)
 }
 
 func (d *Daemon) purgeTranscripts(ctx context.Context, guildId uint64) error {
@@ -145,7 +291,7 @@ func (d *Daemon) purgeTranscripts(ctx context.Context, guildId uint64) error {
 				zap.Strings("failed", status.Failed),
 			)
 
-			time.Sleep(pollInterval(attempt))
+			sleepCtx(ctx, pollInterval(attempt))
 
 		default:
 			return fmt.Errorf("logarchiver returned unexpected status %q", status.Status)
@@ -183,42 +329,4 @@ func formatPurgeErrors(status archiverclient.PurgeStatus) string {
 	}
 
 	return fmt.Sprintf(" (%s)", strings.Join(details, "; "))
-}
-
-func (d *Daemon) isBotInServer(ctx context.Context, guildId uint64) (bool, error) {
-	botId, ok, err := d.database.WhitelabelGuilds.GetBotByGuild(ctx, guildId)
-	if err != nil {
-		return false, err
-	}
-
-	var token string
-	if ok {
-		bot, err := d.database.Whitelabel.GetByBotId(ctx, botId)
-		if err != nil {
-			return false, err
-		}
-
-		// An error here must stop the purge: without the token, the bot's
-		// presence in the server is unknown.
-		token, err = d.tokenKeyring.ResolveStored(botId, bot.Token, bot.TokenCiphertext, bot.TokenKeyVersion)
-		if err != nil {
-			return false, fmt.Errorf("resolving token for whitelabel bot %d: %w", botId, err)
-		}
-	} else {
-		token = d.config.MainBotToken
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
-
-	if _, err := rest.GetGuild(ctx, token, nil, guildId); err != nil {
-		var restError request.RestError
-		if errors.As(err, &restError) && (restError.StatusCode == 403 || restError.StatusCode == 404) {
-			return false, nil
-		} else {
-			return false, err
-		}
-	}
-
-	return true, nil
 }

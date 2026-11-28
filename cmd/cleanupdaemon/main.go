@@ -63,6 +63,18 @@ func main() {
 
 	db := database.NewDatabase(pool)
 
+	var cachePool *pgxpool.Pool
+	if conf.CacheUri != "" {
+		cachePool, err = pgxpool.Connect(context.Background(), conf.CacheUri)
+		if err != nil {
+			panic(err)
+		}
+
+		logger.Debug("Connected to cache database")
+	} else if conf.ProductionMode {
+		logger.Error("CACHE_URI is not set, so cache rows of departed guilds will not be purged")
+	}
+
 	logger.Debug("Built database client")
 
 	// encryption key is not used
@@ -78,22 +90,40 @@ func main() {
 		}
 	})
 
-	daemon := daemon.NewDaemon(logger, conf, client, db, tokenKeyring)
+	daemon := daemon.NewDaemon(logger, conf, client, db, pool, cachePool, tokenKeyring)
 
 	// sentry-go buffers on an async transport; ONESHOT would otherwise drop the
 	// final run's events on return.
 	defer sentry.Flush(time.Second * 2)
-	defer logger.Sync()
+	defer func() { _ = logger.Sync() }()
 	defer pool.Close()
+	if cachePool != nil {
+		defer cachePool.Close()
+	}
 
-	daemon.Run()
+	ctx := context.Background()
+	reconcileInterval := time.Duration(conf.ReconcileIntervalHours) * time.Hour
 
 	if conf.OneShot {
+		if reconcileInterval > 0 {
+			if err := daemon.Reconcile(ctx); err != nil {
+				logger.Error("Guild reconciliation aborted", zap.Error(err))
+			}
+		}
+
+		daemon.Run(ctx)
 		return
 	}
 
+	// Separate goroutine because a Run working through a large backlog can take days.
+	if reconcileInterval > 0 {
+		go daemon.RunReconciler(ctx, reconcileInterval)
+	} else {
+		logger.Info("Guild reconciliation disabled")
+	}
+
 	for {
+		daemon.Run(ctx)
 		time.Sleep(time.Hour * 6)
-		daemon.Run()
 	}
 }
